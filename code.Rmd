@@ -1,0 +1,186 @@
+---
+title: "code"
+author: "Alexander Rogers"
+date: "2024-06-11"
+output: html_document
+---
+
+```{r}
+library(caret) # for randomly splitting training/test 
+library(caTools)
+library(tidyverse)
+library(glmnet)
+library(leaps)
+library(ROCR)
+library(dplyr)
+library(ggcorrplot)
+library(ggplot2)
+library(psych)
+library(readxl)
+library(knitr)
+```
+
+```{r}
+suppressMessages({
+## Load in the raw data 
+data_raw <- read_excel("./spreads/proficiency2.xlsx")
+})
+## Clean Data
+# Replace '.' with NA
+data_raw[data_raw == "."] <- NA
+
+# Replace 'Error: Not Measured' with NA
+data_raw[data_raw == "Error: Not Measured"] <- NA
+
+# Replace 'na' with NA
+data_raw[data_raw == "na"] <- NA
+
+summary(data_raw)
+```
+
+``` {r}
+# Evaluate where the null values are
+a_count <-sapply(data_raw, function(y) sum(length(which(is.na(y)))))
+a_count
+
+# Select only the fields we care about
+
+data_of_interest = data_raw %>%
+  select(FirstFixDur,
+         FirstPassDur,
+         SecondPassDur,
+         TotalDur,
+         FirstPassFixCount,
+         SecondPassFixCount,
+         TotalFixCount,
+         
+         L1,
+         
+         dele,
+         sr_rdg,
+         sr_list,
+         sr_wr,
+         sr_spk,
+         
+         wm_tot,
+         wm_process,
+         wm_storage,
+         fl_acc_ie,
+         fl_acc_fe,
+         fl_rt_ie,
+         fl_rt_fe)
+
+data_of_interest
+
+data_of_interest = data_of_interest %>%
+  mutate(dele = case_when(L1 == 'SpanishMonolingual' ~ 100,
+                         L1 != 'SpanishMonolingual' ~ dele))
+
+# Check to make sure changes are implemented
+data_of_interest %>% 
+  filter(L1 =='SpanishMonolingual' ) %>% 
+  select(L1, dele)
+
+## Do initial correlations with Eye Test Data and Dele
+
+#Get just eye test and dele
+dele_data = data_of_interest %>%
+  select(FirstFixDur,
+         FirstPassDur,
+         SecondPassDur,
+         TotalDur,
+         FirstPassFixCount,
+         SecondPassFixCount,
+         TotalFixCount,
+         dele)
+
+a_count <-sapply(dele_data, function(y) sum(length(which(is.na(y)))))
+a_count
+
+nrow(dele_data)
+
+#remove all null dele rows
+dele_data = dele_data[!is.na(dele_data$dele),]
+sapply(dele_data, function(y) sum(length(which(is.na(y)))))
+
+#Correlations
+
+dele_data = dele_data %>% mutate_at(c('FirstFixDur',
+                                      'FirstPassDur',
+                                      'SecondPassDur',
+                                      'TotalDur',
+                                      'FirstPassFixCount',
+                                      'SecondPassFixCount',
+                                      'TotalFixCount',
+                                      'dele'), as.numeric)
+
+dele_data <- dele_data %>%
+  na.omit()
+
+
+x <- dele_data$dele
+y <- dele_data[1:7]
+cor(x, y)
+## Top Correlated measures are FirstPassDur, TotalDur, FirstFixDur, SecondPassDur
+
+## Create the Bayes Linear Model with these predictors on Testing Data
+
+# Train/Test split the data
+smp_size <- floor(0.75 * nrow(dele_data))
+set.seed(123)
+train_ind <- sample(seq_len(nrow(dele_data)), size = smp_size)
+
+train <- dele_data[train_ind, ]
+test <- dele_data[-train_ind, ]
+
+# Take only the top correlated fields as analysis
+X_train <- train[,c("FirstFixDur","TotalDur","FirstPassDur","SecondPassDur")]
+Y_train <- train[,"dele"]
+
+X_test <- test[,c("FirstFixDur","TotalDur","FirstPassDur","SecondPassDur")]
+Y_test <- test[,"dele"]
+
+#install.packages(c('mlbench','rstanarm', 'bayestestR', 'bayesplot','insight','broom'))
+suppressPackageStartupMessages(library(mlbench))
+suppressPackageStartupMessages(library(rstanarm))
+suppressPackageStartupMessages(library(bayestestR))
+suppressPackageStartupMessages(library(bayesplot))
+suppressPackageStartupMessages(library(insight))
+suppressPackageStartupMessages(library(broom))
+
+
+#Create the Bayes Model
+dele_train <- train[,c("dele","FirstFixDur","TotalDur","FirstPassDur","SecondPassDur")]
+formula <- dele~.
+
+dele_bayes <- stan_glm(formula, data= dele_train, seed=111)
+
+print(dele_bayes, digits = 3)
+
+mcmc_dens(dele_bayes, pars = c("FirstFixDur"))+
+  vline_at(-0.004, col="red")
+mcmc_dens(dele_bayes, pars = c("TotalDur"))+
+  vline_at(-0.004, col="red")
+mcmc_dens(dele_bayes, pars = c("FirstPassDur"))+
+  vline_at(-0.002, col="red")
+mcmc_dens(dele_bayes, pars = c("SecondPassDur"))+
+  vline_at(-0.002, col="red")
+
+describe_posterior(dele_bayes)
+hdi(dele_bayes)
+eti(dele_bayes)
+
+
+y_point_est <- predict(dele_bayes, newdata = X_test)
+y_point_est <- data.frame(y_point_est)
+dim(y_point_est)
+dim(Y_test)
+glimpse(y_point_est)
+glimpse(Y_test)
+squared_error = (Y_test$dele - y_point_est)^2
+mean_squared_error = sapply(squared_error, mean, 2)
+RMSE = sqrt(mean_squared_error)
+RMSE
+
+#Root Mean Squared Error on the TEST DATA is 12.423. Meaning that ON AVERAGE, our model predictions for dele are 12.423 units away from the true value                                    
+```
